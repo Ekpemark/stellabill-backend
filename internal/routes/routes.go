@@ -1,8 +1,11 @@
 package routes
 
 import (
-	"fmt"
-	"stellarbill-backend/internal/auth"
+	"log"
+	"os"
+	"time"
+
+	"stellarbill-backend/internal/cache"
 	"stellarbill-backend/internal/config"
 	"stellarbill-backend/internal/handlers"
 	"stellarbill-backend/internal/middleware"
@@ -54,21 +57,29 @@ func Register(r *gin.Engine) {
 		MaxRatio:             cfg.MaxGzipRatio,
 	}))
 
-	// Dependencies
-	subRepo := repository.NewMockSubscriptionRepo()
-	planRepo := repository.NewMockPlanRepo()
+	// Each cached repo gets its own InMemory cache instance so that Flush is
+	// scoped to its namespace and does not evict entries from other caches.
+	planCache := cache.NewInMemory()
+	subCache := cache.NewInMemory()
+	const repoCacheTTL = 5 * time.Minute
+
+	rawPlanRepo := repository.NewMockPlanRepo()
+	rawSubRepo := repository.NewMockSubscriptionRepo()
+
+	cachedPlanRepo := repository.NewCachedPlanRepo(rawPlanRepo, planCache, repoCacheTTL)
+	cachedSubRepo := repository.NewCachedSubscriptionRepo(rawSubRepo, subCache, repoCacheTTL)
+
+	svc := service.NewSubscriptionService(cachedSubRepo, cachedPlanRepo)
+
+	// Statement service wiring (in-memory mock for test/dev)
 	stmtRepo := repository.NewMockStatementRepo()
+	stmtSvc := service.NewStatementService(rawSubRepo, stmtRepo)
 
-	stmtSvc := service.NewStatementService(subRepo, stmtRepo)
-	svc := service.NewSubscriptionService(subRepo, planRepo)
-
-	// Create handlers
-	h := handlers.NewHandler(nil, nil)
-	adminHandler := handlers.NewAdminHandler(cfg.AdminToken)
-
-	// Auth configuration
-	jwtSecret := cfg.JWTSecret
-	authMiddleware := middleware.AuthMiddleware(nil, jwtSecret)
+	// Admin handler receives the cached repos so PurgeCache can invalidate them.
+	adminToken := os.Getenv("ADMIN_TOKEN")
+	adminHandler := handlers.NewAdminHandler(adminToken, cachedPlanRepo, cachedSubRepo)
+	// Wire the cached plan repo into the package-level ListPlans handler.
+	handlers.SetPlanRepository(cachedPlanRepo)
 
 	// API Groups
 	api := r.Group("/api")

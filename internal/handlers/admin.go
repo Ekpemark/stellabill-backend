@@ -2,39 +2,73 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"stellarbill-backend/internal/audit"
-	"stellarbill-backend/internal/validation"
+	"stellarbill-backend/internal/cache"
 )
 
-// AdminHandler encapsulates admin-only HTTP operations.
+// AdminHandler encapsulates admin-only operations (secured via static token).
+// Inject cache.Purgeable instances at construction time via NewAdminHandler so
+// PurgeCache can actually invalidate live cache state rather than returning a
+// placeholder response.
 type AdminHandler struct {
 	expectedToken string
+	purgeables    []cache.Purgeable
 }
 
-// NewAdminHandler constructs an AdminHandler with the provided token.
-func NewAdminHandler(token string) *AdminHandler {
-	return &AdminHandler{expectedToken: token}
+// NewAdminHandler builds an admin handler.
+//   - token: the expected value of the X-Admin-Token request header.
+//     If empty, defaults to "change-me-admin-token".
+//   - purgeables: zero or more cache namespaces to flush on POST /api/admin/purge.
+//     Pass each CachedPlanRepo / CachedSubscriptionRepo here.
+func NewAdminHandler(token string, purgeables ...cache.Purgeable) *AdminHandler {
+	if token == "" {
+		token = "change-me-admin-token"
+	}
+	return &AdminHandler{expectedToken: token, purgeables: purgeables}
 }
 
-// =============================================================================
-// authAdmin – shared authentication + authorisation gate
-// =============================================================================
+// namespaceSummary holds the per-namespace result included in the purge response.
+type namespaceSummary struct {
+	Namespace     string `json:"namespace"`
+	KeysPurged    int    `json:"keys_purged"`
+	CountersReset bool   `json:"counters_reset"`
+	Error         string `json:"error,omitempty"`
+}
 
-// authAdmin validates the admin token, actor identity, and RBAC role in a
-// single pass.  It returns (actor, role, true) on success.  On any failure it
-// writes the appropriate HTTP response, emits a denied audit event, calls
-// c.Abort(), and returns ("", "", false) so the caller can return immediately
-// without writing a second response.
+// purgeResponse is the JSON body returned by a successful PurgeCache call.
+type purgeResponse struct {
+	Status          string             `json:"status"`
+	TotalKeysPurged int                `json:"total_keys_purged"`
+	Namespaces      []namespaceSummary `json:"namespaces"`
+	Timestamp       time.Time          `json:"timestamp"`
+}
+
+// PurgeCache invalidates all active cache entries managed by the registered
+// cache namespaces, resets hit/miss counters, and returns a detailed summary.
 //
-// Security invariants enforced here:
-//  1. Token must match the server-side secret (authentication).
-//  2. Actor identifier must contain only safe characters (identity hygiene).
-//  3. Role must be in the known-roles allow-list (prevents unknown-role bypass).
-//  4. Role must be in the per-action ACL (authorisation / privilege separation).
-func (h *AdminHandler) authAdmin(c *gin.Context, action string) (actor string, role AdminRole, ok bool) {
-	// ── 1. Token authentication ──────────────────────────────────────────────
+// Behaviour:
+//   - Idempotent: repeated calls on an already-empty cache return 200 with
+//     total_keys_purged = 0 and no error.
+//   - Concurrent-safe: each Purgeable is responsible for its own locking;
+//     the handler collects results independently per namespace.
+//   - Partial failure: if any namespace returns an error the HTTP status is 202
+//     and the "error" field is set on the affected namespace summary. Other
+//     namespaces that succeeded are still reported correctly.
+//   - Auth: a missing or wrong X-Admin-Token header returns 401 immediately
+//     without touching any cache state.
+func (h *AdminHandler) PurgeCache(c *gin.Context) {
+	target := c.DefaultQuery("target", "billing-cache")
+	attempt := c.DefaultQuery("attempt", "1")
+	actor := c.GetHeader("X-Admin-User")
+	if actor == "" {
+		actor = "unknown-admin"
+	}
+
+	// --- Auth check ---
 	token := c.GetHeader("X-Admin-Token")
 	if token != h.expectedToken {
 		audit.LogAction(c, action, c.FullPath(), "denied", map[string]string{
@@ -234,274 +268,56 @@ func (h *AdminHandler) PurgeCache(c *gin.Context) {
 		return
 	}
 
-	outcome := "success"
-	status := http.StatusOK
-	if c.Query("partial") == "1" {
-		outcome = "partial"
-		status = http.StatusAccepted
+	ctx := c.Request.Context()
+
+	// --- Flush every registered namespace ---
+	summaries := make([]namespaceSummary, 0, len(h.purgeables))
+	totalKeys := 0
+	hasError := false
+
+	for _, p := range h.purgeables {
+		ns := namespaceSummary{Namespace: p.Namespace()}
+
+		n, err := p.Flush(ctx)
+		if err != nil {
+			ns.Error = err.Error()
+			hasError = true
+		} else {
+			ns.KeysPurged = n
+			totalKeys += n
+		}
+
+		// Always reset metrics regardless of flush outcome so counters do not
+		// accumulate stale data from before the attempted purge.
+		p.ResetMetrics()
+		ns.CountersReset = true
+
+		summaries = append(summaries, ns)
 	}
 
-	audit.LogAction(c, action, target, outcome, enrichedMeta(c, actor, role, map[string]string{
-		"attempt": strconv.Itoa(attempt),
-	}))
-	c.JSON(status, gin.H{
-		"status":  outcome,
-		"target":  target,
-		"attempt": strconv.Itoa(attempt),
+	// --- Determine outcome ---
+	// "partial" if any namespace errored OR if the caller explicitly set ?partial=1
+	// (the ?partial=1 param is retained for backward compatibility with existing
+	// audit/demo tests that simulate partial operations).
+	auditOutcome := "success"
+	httpStatus := http.StatusOK
+	respStatus := "purged"
+
+	if hasError || c.Query("partial") == "1" {
+		auditOutcome = "partial"
+		httpStatus = http.StatusAccepted
+		respStatus = "partial"
+	}
+
+	audit.LogAction(c, "admin_purge", target, auditOutcome, map[string]string{
+		"attempt":     attempt,
+		"keys_purged": strconv.Itoa(totalKeys),
 	})
-}
 
-// =============================================================================
-// BanUser
-// =============================================================================
-
-// BanUserRequest is the validated JSON body for the BanUser endpoint.
-type BanUserRequest struct {
-	// UserID is the UUID of the account to ban. Required.
-	UserID string `json:"user_id" binding:"required"`
-	// Reason is a human-readable explanation for the ban. Required, max 500 chars.
-	Reason string `json:"reason" binding:"required"`
-}
-
-// BanUser marks a user account as banned.
-//
-// Allowed roles: super_admin, ops_admin.
-//
-// Request body (JSON):
-//
-//	user_id – UUID of the target account
-//	reason  – human-readable ban reason (max 500 characters)
-//
-// Audit event: action="admin_ban_user", fields: actor, role, request_id,
-// user_agent, reason.
-func (h *AdminHandler) BanUser(c *gin.Context) {
-	const action = "admin_ban_user"
-
-	actor, role, ok := h.authAdmin(c, action)
-	if !ok {
-		return
-	}
-
-	var req BanUserRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		audit.LogAction(c, action, "", "denied", enrichedMeta(c, actor, role, map[string]string{
-			"reason": "invalid_body",
-		}))
-		RespondWithValidationError(c, "invalid request body",
-			[]validation.FieldError{{Field: "body", Message: err.Error()}})
-		return
-	}
-
-	if !isValidUUID(req.UserID) {
-		audit.LogAction(c, action, req.UserID, "denied", enrichedMeta(c, actor, role, map[string]string{
-			"reason": "invalid_user_id",
-		}))
-		RespondWithValidationError(c, "user_id must be a valid RFC-4122 UUID",
-			[]validation.FieldError{{Field: "user_id", Message: "must be a valid UUID"}})
-		return
-	}
-
-	if len(req.Reason) > maxReasonLen {
-		audit.LogAction(c, action, req.UserID, "denied", enrichedMeta(c, actor, role, map[string]string{
-			"reason": "reason_too_long",
-		}))
-		RespondWithValidationError(c,
-			fmt.Sprintf("reason must not exceed %d characters", maxReasonLen),
-			[]validation.FieldError{{Field: "reason", Message: fmt.Sprintf("max_length: %d", maxReasonLen)}})
-		return
-	}
-
-	audit.LogAction(c, action, req.UserID, "success", enrichedMeta(c, actor, role, map[string]string{
-		"reason": req.Reason,
-	}))
-	c.JSON(http.StatusOK, gin.H{
-		"status":  "banned",
-		"user_id": req.UserID,
-	})
-}
-
-// =============================================================================
-// UpdatePlanPrice
-// =============================================================================
-
-// UpdatePlanPriceRequest is the validated JSON body for the UpdatePlanPrice endpoint.
-type UpdatePlanPriceRequest struct {
-	// PlanID is the UUID of the billing plan to update. Required.
-	PlanID string `json:"plan_id" binding:"required"`
-	// NewPrice is the new price in the specified currency. Required.
-	// Must be a positive decimal with at most 6 integer digits and 2 fraction digits.
-	NewPrice string `json:"new_price" binding:"required"`
-	// Currency is the ISO 4217 three-letter currency code (e.g. "USD"). Required.
-	Currency string `json:"currency" binding:"required"`
-}
-
-// UpdatePlanPrice changes the price of a billing plan.
-//
-// Allowed roles: super_admin, billing_admin.
-//
-// Request body (JSON):
-//
-//	plan_id   – UUID of the target plan
-//	new_price – positive decimal amount (e.g. "19.99")
-//	currency  – 3-letter ISO 4217 code (e.g. "USD")
-//
-// Audit event: action="admin_update_plan_price", fields: actor, role,
-// request_id, user_agent, new_price, currency.
-func (h *AdminHandler) UpdatePlanPrice(c *gin.Context) {
-	const action = "admin_update_plan_price"
-
-	actor, role, ok := h.authAdmin(c, action)
-	if !ok {
-		return
-	}
-
-	var req UpdatePlanPriceRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		audit.LogAction(c, action, "", "denied", enrichedMeta(c, actor, role, map[string]string{
-			"reason": "invalid_body",
-		}))
-		RespondWithValidationError(c, "invalid request body",
-			[]validation.FieldError{{Field: "body", Message: err.Error()}})
-		return
-	}
-
-	if !isValidUUID(req.PlanID) {
-		audit.LogAction(c, action, req.PlanID, "denied", enrichedMeta(c, actor, role, map[string]string{
-			"reason": "invalid_plan_id",
-		}))
-		RespondWithValidationError(c, "plan_id must be a valid RFC-4122 UUID",
-			[]validation.FieldError{{Field: "plan_id", Message: "must be a valid UUID"}})
-		return
-	}
-
-	if !isValidPrice(req.NewPrice) {
-		audit.LogAction(c, action, req.PlanID, "denied", enrichedMeta(c, actor, role, map[string]string{
-			"reason": "invalid_price",
-		}))
-		RespondWithValidationError(c,
-			"new_price must be a positive decimal with up to 6 integer digits and 2 decimal places",
-			[]validation.FieldError{{Field: "new_price", Message: "example: 19.99"}})
-		return
-	}
-
-	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
-	if len(currency) != 3 || !isAlphaOnly(currency) {
-		audit.LogAction(c, action, req.PlanID, "denied", enrichedMeta(c, actor, role, map[string]string{
-			"reason": "invalid_currency",
-		}))
-		RespondWithValidationError(c, "currency must be a 3-letter ISO 4217 code",
-			[]validation.FieldError{{Field: "currency", Message: "example: USD"}})
-		return
-	}
-
-	audit.LogAction(c, action, req.PlanID, "success", enrichedMeta(c, actor, role, map[string]string{
-		"new_price": req.NewPrice,
-		"currency":  currency,
-	}))
-	c.JSON(http.StatusOK, gin.H{
-		"status":    "updated",
-		"plan_id":   req.PlanID,
-		"new_price": req.NewPrice,
-		"currency":  currency,
-	})
-}
-
-// =============================================================================
-// ReactivateSubscription
-// =============================================================================
-
-// ReactivateSubscriptionRequest is the validated JSON body for the
-// ReactivateSubscription endpoint.
-type ReactivateSubscriptionRequest struct {
-	// SubscriptionID is the UUID of the subscription to reactivate. Required.
-	SubscriptionID string `json:"subscription_id" binding:"required"`
-}
-
-// ReactivateSubscription reactivates a cancelled subscription.
-//
-// Allowed roles: super_admin, billing_admin.
-//
-// Request body (JSON):
-//
-//	subscription_id – UUID of the cancelled subscription
-//
-// Audit event: action="admin_reactivate_sub", fields: actor, role, request_id,
-// user_agent.
-func (h *AdminHandler) ReactivateSubscription(c *gin.Context) {
-	const action = "admin_reactivate_sub"
-
-	actor, role, ok := h.authAdmin(c, action)
-	if !ok {
-		return
-	}
-
-	var req ReactivateSubscriptionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		audit.LogAction(c, action, "", "denied", enrichedMeta(c, actor, role, map[string]string{
-			"reason": "invalid_body",
-		}))
-		RespondWithValidationError(c, "invalid request body",
-			[]validation.FieldError{{Field: "body", Message: err.Error()}})
-		return
-	}
-
-	if !isValidUUID(req.SubscriptionID) {
-		audit.LogAction(c, action, req.SubscriptionID, "denied", enrichedMeta(c, actor, role, map[string]string{
-			"reason": "invalid_subscription_id",
-		}))
-		RespondWithValidationError(c, "subscription_id must be a valid RFC-4122 UUID",
-			[]validation.FieldError{{Field: "subscription_id", Message: "must be a valid UUID"}})
-		return
-	}
-
-	audit.LogAction(c, action, req.SubscriptionID, "success",
-		enrichedMeta(c, actor, role, nil))
-	c.JSON(http.StatusOK, gin.H{
-		"status":          "reactivated",
-		"subscription_id": req.SubscriptionID,
-	})
-}
-
-// =============================================================================
-// GetAuditLog
-// =============================================================================
-
-// GetAuditLog returns a paginated list of recent audit entries.
-//
-// Allowed roles: super_admin, billing_admin, ops_admin, read_only_admin.
-//
-// Query parameters:
-//
-//	limit – number of entries to return (1-500, default: 50)
-//
-// Audit event: action="admin_get_audit_log", fields: actor, role, request_id,
-// user_agent, limit.
-func (h *AdminHandler) GetAuditLog(c *gin.Context) {
-	const action = "admin_get_audit_log"
-
-	actor, role, ok := h.authAdmin(c, action)
-	if !ok {
-		return
-	}
-
-	limitRaw := c.DefaultQuery("limit", "50")
-	limit, err := strconv.Atoi(limitRaw)
-	if err != nil || limit < minLimitVal || limit > maxLimitVal {
-		audit.LogAction(c, action, "audit_log", "denied", enrichedMeta(c, actor, role, map[string]string{
-			"reason":    "invalid_limit",
-			"limit_raw": limitRaw,
-		}))
-		RespondWithValidationError(c,
-			fmt.Sprintf("limit must be an integer between %d and %d", minLimitVal, maxLimitVal),
-			[]validation.FieldError{{Field: "limit", Message: fmt.Sprintf("range: [%d, %d]", minLimitVal, maxLimitVal)}})
-		return
-	}
-
-	audit.LogAction(c, action, "audit_log", "success", enrichedMeta(c, actor, role, map[string]string{
-		"limit": strconv.Itoa(limit),
-	}))
-	c.JSON(http.StatusOK, gin.H{
-		"entries": []gin.H{},
-		"limit":   limit,
+	c.JSON(httpStatus, purgeResponse{
+		Status:          respStatus,
+		TotalKeysPurged: totalKeys,
+		Namespaces:      summaries,
+		Timestamp:       time.Now().UTC(),
 	})
 }
