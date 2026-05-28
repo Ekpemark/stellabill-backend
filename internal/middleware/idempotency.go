@@ -16,20 +16,20 @@ import (
 // DefaultIdempotencyTTL is the default cache duration for idempotency keys (24 hours).
 const DefaultIdempotencyTTL = 24 * time.Hour
 
-// responseWriter intercepts the written response status code and body so we can store them.
-type responseWriter struct {
+// idempotencyResponseWriter intercepts the written response status code and body so we can store them.
+type idempotencyResponseWriter struct {
 	gin.ResponseWriter
 	body *bytes.Buffer
 }
 
 // Write intercepts the write of response bytes.
-func (w *responseWriter) Write(b []byte) (int, error) {
+func (w *idempotencyResponseWriter) Write(b []byte) (int, error) {
 	w.body.Write(b)
 	return w.ResponseWriter.Write(b)
 }
 
 // WriteString intercepts the write of response strings.
-func (w *responseWriter) WriteString(s string) (int, error) {
+func (w *idempotencyResponseWriter) WriteString(s string) (int, error) {
 	w.body.WriteString(s)
 	return w.ResponseWriter.WriteString(s)
 }
@@ -125,7 +125,7 @@ func Idempotency(store IdempotencyStore) gin.HandlerFunc {
 		}
 
 		// First request: execute downstream handler and capture response
-		w := &responseWriter{
+		w := &idempotencyResponseWriter{
 			ResponseWriter: c.Writer,
 			body:           &bytes.Buffer{},
 		}

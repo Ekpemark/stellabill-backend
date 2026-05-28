@@ -75,6 +75,7 @@ func Register(r *gin.Engine) {
 	if jwtSecret == "" {
 		jwtSecret = "dev-secret"
 	}
+	authMiddleware := middleware.AuthMiddleware(nil, jwtSecret)
 
 	// Each cached repo gets its own InMemory cache instance so that Flush is
 	// scoped to its namespace and does not evict entries from other caches.

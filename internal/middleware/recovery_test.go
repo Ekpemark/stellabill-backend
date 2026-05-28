@@ -5,10 +5,15 @@ import (
 	"log"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 )
+
+const internalErrorMessage = "internal server error"
+
+type testRuntimeErr string
 
 type ErrorResponse struct {
 	Error   string    `json:"error"`

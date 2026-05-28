@@ -701,3 +701,25 @@ func validateDBPool(c *Config, result *ValidationResult) {
 				c.DBPoolMaxConnIdleTime, c.DBPoolMaxConnLifetime))
 	}
 }
+
+func validateAllowedOrigins(origins string, env string) error {
+	if origins == "" {
+		return nil
+	}
+	parts := strings.Split(origins, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if env == "production" {
+			if p == "*" {
+				return fmt.Errorf("wildcard origin not allowed in production")
+			}
+			if !strings.HasPrefix(p, "https://") && !strings.HasPrefix(p, "http://localhost") && !strings.HasPrefix(p, "http://127.0.0.1") {
+				return fmt.Errorf("origin must use HTTPS in production: %s", p)
+			}
+		}
+	}
+	return nil
+}

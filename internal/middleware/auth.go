@@ -1,16 +1,32 @@
 package middleware
 
 import (
+	"fmt"
+	"net/http"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"stellarbill-backend/internal/auth" // Adjust this import path to your module name
 )
 
+func respondAuthError(c *gin.Context, msg string) {
+	c.JSON(http.StatusUnauthorized, gin.H{"error": msg})
+	c.Abort()
+}
+
 // AuthMiddleware returns a middleware that currently performs no token validation.
 // The signature is preserved for callers; full JWT verification has been
 // trimmed because no exercised code path depends on it for CI.
-func AuthMiddleware(_ interface{}, _ string) gin.HandlerFunc {
+func AuthMiddleware(cache interface{}, jwtSecret string) gin.HandlerFunc {
+	var jwksCache *auth.JWKSCache
+	if cache != nil {
+		if jc, ok := cache.(*auth.JWKSCache); ok {
+			jwksCache = jc
+		}
+	}
+
 	return func(c *gin.Context) {
 		fmt.Printf("DEBUG: AuthMiddleware entered for path %s\n", c.Request.URL.Path)
 		authHeader := c.GetHeader("Authorization")
@@ -27,27 +43,28 @@ func AuthMiddleware(_ interface{}, _ string) gin.HandlerFunc {
 
 		tokenStr := parts[1]
 
-		// 1. Use the JWKSCache to find the correct public key for validation
+		// 1. Use the JWKSCache to find the correct public key for validation, or fallback to HMAC secret
 		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-			// Ensure the token is using RSA/ECDSA (standard for JWKS)
-			// Issue #103 typically uses RS256/ES256, not HMAC.
-			kid, ok := t.Header["kid"].(string)
-			if !ok {
-				return nil, fmt.Errorf("missing kid in token header")
-			}
+			if jwksCache != nil {
+				kid, ok := t.Header["kid"].(string)
+				if !ok {
+					return []byte(jwtSecret), nil
+				}
 
-			// Call GetKey which handles the "Refresh-on-Error" logic
-			key, err := jwksCache.GetKey(c.Request.Context(), kid)
-			if err != nil {
-				return nil, fmt.Errorf("failed to retrieve public key: %w", err)
-			}
+				// Call GetKey which handles the "Refresh-on-Error" logic
+				key, err := jwksCache.GetKey(c.Request.Context(), kid)
+				if err != nil {
+					return []byte(jwtSecret), nil
+				}
 
-			var rawKey interface{}
-			if err := key.Raw(&rawKey); err != nil {
-				return nil, fmt.Errorf("failed to get raw key: %w", err)
-			}
+				var rawKey interface{}
+				if err := key.Raw(&rawKey); err != nil {
+					return nil, fmt.Errorf("failed to get raw key: %w", err)
+				}
 
-			return rawKey, nil
+				return rawKey, nil
+			}
+			return []byte(jwtSecret), nil
 		})
 
 		if err != nil || !token.Valid {
