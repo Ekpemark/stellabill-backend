@@ -11,6 +11,14 @@ export function loadtestTarget() {
 }
 
 export function authHeaders() {
+  if (__ENV.LOADTEST_JWT) {
+    return {
+      Authorization: `Bearer ${__ENV.LOADTEST_JWT}`,
+      'Content-Type': 'application/json',
+      'X-Tenant-ID': __ENV.LOADTEST_TENANT || 'loadtest-tenant',
+    };
+  }
+
   const secret = __ENV.JWT_SECRET || DEFAULT_SECRET;
   const token = createJwtToken(secret, __ENV.LOADTEST_ROLE || DEFAULT_ROLE, __ENV.LOADTEST_SUBJECT || DEFAULT_SUBJECT);
 
