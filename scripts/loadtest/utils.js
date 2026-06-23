@@ -17,6 +17,7 @@ export function authHeaders() {
   return {
     Authorization: `Bearer ${token}`,
     'Content-Type': 'application/json',
+    'X-Tenant-ID': __ENV.LOADTEST_TENANT || 'loadtest-tenant',
   };
 }
 
@@ -26,6 +27,7 @@ function createJwtToken(secret, role, subject) {
   const payload = {
     sub: subject,
     role,
+    tenant: __ENV.LOADTEST_TENANT || 'loadtest-tenant',
     iat: timestamp,
     exp: timestamp + 3600,
   };
@@ -33,7 +35,7 @@ function createJwtToken(secret, role, subject) {
   const encodedHeader = base64UrlEncode(JSON.stringify(header));
   const encodedPayload = base64UrlEncode(JSON.stringify(payload));
   const signingInput = `${encodedHeader}.${encodedPayload}`;
-  const signature = base64UrlEncode(hmacSha256(secret, signingInput));
+  const signature = crypto.hmac('sha256', signingInput, secret, 'base64rawurl');
 
   return `${signingInput}.${signature}`;
 }
@@ -41,8 +43,4 @@ function createJwtToken(secret, role, subject) {
 function base64UrlEncode(value) {
   const encoded = encoding.b64encode(value);
   return encoded.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function hmacSha256(secret, message) {
-  return crypto.hmac('sha256', message, secret, 'raw');
 }
