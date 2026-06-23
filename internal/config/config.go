@@ -75,6 +75,11 @@ type Config struct {
 	TracingServiceName string
 	// CORS configuration
 	AllowedOrigins string
+	// Security headers
+	SecurityFrameAncestors string
+	// Outbox JWE configuration
+	OutboxJWEEnabled             bool
+	OutboxJWESensitiveEventTypes []string
 	// DB connection pool tuning (seconds for the time-based fields)
 	DBPoolMaxConns          int
 	DBPoolMinConns          int
@@ -224,6 +229,10 @@ func Load(opts ...Option) (Config, error) {
 		TracingExporter:     getEnv("TRACING_EXPORTER", "stdout"),
 		TracingServiceName:  getEnv("TRACING_SERVICE_NAME", "stellabill-backend"),
 		AllowedOrigins:      getEnv("ALLOWED_ORIGINS", ""),
+		SecurityFrameAncestors: getEnv("SECURITY_FRAME_ANCESTORS", "'none'"),
+		OutboxJWEEnabled:        getEnvBool("OUTBOX_JWE_ENABLED", false),
+		OutboxJWESensitiveEventTypes: parseCommaSeparated(getEnv("OUTBOX_JWE_SENSITIVE_EVENT_TYPES",
+			"webhook.received,payment.processed")),
 		// DB pool defaults; overridden by valid DB_POOL_* env vars in validateDBPool.
 		DBPoolMaxConns:          DefaultDBPoolMaxConns,
 		DBPoolMinConns:          DefaultDBPoolMinConns,
@@ -727,6 +736,29 @@ func getEnvFloat64(key string, fallback float64) float64 {
 		}
 	}
 	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return fallback
+}
+
+func parseCommaSeparated(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // validateDBPool reads DB_POOL_* env vars, validates them, and writes safe

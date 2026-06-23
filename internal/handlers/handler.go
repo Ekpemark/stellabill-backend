@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -64,7 +65,7 @@ func NewHandlerWithDependencies(
 // ListDeadLetteredEvents handles GET /api/admin/outbox/dead-letter
 func (h *Handler) ListDeadLetteredEvents(c *gin.Context) {
 	if h.OutboxRepo == nil {
-		RespondWithError(c, http.StatusServiceUnavailable, ErrorCodeInternal, "outbox repository not available")
+		RespondWithError(c, http.StatusServiceUnavailable, ErrorCodeServiceUnavailable, "outbox repository not available")
 		return
 	}
 
@@ -77,24 +78,47 @@ func (h *Handler) ListDeadLetteredEvents(c *gin.Context) {
 
 	events, err := h.OutboxRepo.ListDeadLetteredEvents(limit)
 	if err != nil {
-		RespondWithError(c, http.StatusInternalServerError, ErrorCodeInternal, "failed to list dead-lettered events")
+		RespondWithError(c, http.StatusInternalServerError, ErrorCodeInternalError, "failed to list dead-lettered events")
 		return
 	}
 
-	c.JSON(http.StatusOK, events)
+	c.JSON(http.StatusOK, redactEncryptedOutboxEvents(events))
+}
+
+func redactEncryptedOutboxEvents(events []*outbox.Event) []gin.H {
+	out := make([]gin.H, 0, len(events))
+	for _, event := range events {
+		entry := gin.H{
+			"id":           event.ID,
+			"event_type":   event.EventType,
+			"aggregate_id": event.AggregateID,
+			"status":       event.Status,
+			"retry_count":  event.RetryCount,
+			"occurred_at":  event.OccurredAt,
+			"error_message": event.ErrorMessage,
+		}
+		var envelope outbox.EventData
+		if err := json.Unmarshal(event.EventData, &envelope); err == nil && envelope.Encrypted {
+			entry["encrypted"] = true
+			entry["key_id"] = envelope.KeyID
+			entry["subscriber_id"] = envelope.SubscriberID
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // RequeueOutboxEvent handles POST /api/admin/outbox/:id/requeue
 func (h *Handler) RequeueOutboxEvent(c *gin.Context) {
 	if h.OutboxRepo == nil {
-		RespondWithError(c, http.StatusServiceUnavailable, ErrorCodeInternal, "outbox repository not available")
+		RespondWithError(c, http.StatusServiceUnavailable, ErrorCodeServiceUnavailable, "outbox repository not available")
 		return
 	}
 
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		RespondWithError(c, http.StatusBadRequest, ErrorCodeInvalidRequest, "invalid event ID")
+		RespondWithError(c, http.StatusBadRequest, ErrorCodeBadRequest, "invalid event ID")
 		return
 	}
 
@@ -104,7 +128,7 @@ func (h *Handler) RequeueOutboxEvent(c *gin.Context) {
 			RespondWithError(c, http.StatusNotFound, ErrorCodeNotFound, err.Error())
 			return
 		}
-		RespondWithError(c, http.StatusInternalServerError, ErrorCodeInternal, "failed to requeue event")
+		RespondWithError(c, http.StatusInternalServerError, ErrorCodeInternalError, "failed to requeue event")
 		return
 	}
 

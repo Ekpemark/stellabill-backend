@@ -202,6 +202,16 @@ func (d *dispatcher) processEvent(event *Event) error {
 
 // handlePublishError handles publishing errors and implements retry logic
 func (d *dispatcher) handlePublishError(event *Event, err error) error {
+	if IsPermanentPublishError(err) {
+		errorMsg := err.Error()
+		if updateErr := d.repository.UpdateStatus(event.ID, StatusFailed, &errorMsg); updateErr != nil {
+			log.Printf("%s", security.MaskPII(fmt.Sprintf("Failed to mark event %s as failed: %v", security.MaskPII(event.ID.String()), updateErr)))
+			return updateErr
+		}
+		log.Printf("%s", security.MaskPII(fmt.Sprintf("Event %s routed to dead-letter (permanent): %v", security.MaskPII(event.ID.String()), err)))
+		return err
+	}
+
 	event.RetryCount++
 	
 	if event.RetryCount >= d.config.MaxRetries {

@@ -11,7 +11,6 @@ import (
 	"stellarbill-backend/internal/auth"
 	"stellarbill-backend/internal/cache"
 	"stellarbill-backend/internal/config"
-	"stellarbill-backend/internal/db"
 	"stellarbill-backend/internal/featureflags"
 	"stellarbill-backend/internal/handlers"
 	"stellarbill-backend/internal/metrics"
@@ -19,7 +18,6 @@ import (
 	"stellarbill-backend/internal/outbox"
 	"stellarbill-backend/internal/reconciliation"
 	"stellarbill-backend/internal/repository"
-	"stellarbill-backend/internal/secrets"
 	"stellarbill-backend/internal/service"
 	"stellarbill-backend/internal/startup"
 	"stellarbill-backend/internal/tracing"
@@ -30,10 +28,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
-<<<<<<< Open-and-inject-a-real-database-connection-pool-at-startup
 
-=======
->>>>>>> main
 
 // Register configures all routes on the provided router.
 func Register(r *gin.Engine) {
@@ -77,37 +72,17 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 	}
 	r.Use(middleware.RateLimitMiddleware(rateLimitConfig))
 
-	// Open a real connection pool from cfg.DBConn, applying the DBPool* tuning
-	// fields. When DATABASE_URL is empty (local dev) NewPool returns (nil, nil)
-	// and we degrade gracefully to in-memory dependencies below.
 	var dbPool *pgxpool.Pool
 	var planDB *sql.DB
 	if cfg.DBConn != "" {
-<<<<<<< Open-and-inject-a-real-database-connection-pool-at-startup
-		connectCtx, cancel := context.WithTimeout(
-			context.Background(),
-			time.Duration(cfg.DBPoolConnectTimeout)*time.Second,
-		)
-		dbPool, err = db.NewPool(connectCtx, cfg)
-		cancel()
-=======
-		poolConfig, err := pgxpool.ParseConfig(cfg.DBConn)
->>>>>>> main
+		var err error
+		dbPool, err = pgxpool.New(context.Background(), cfg.DBConn)
 		if err != nil {
-			fmt.Printf("Failed to parse database pool config: %v\n", err)
-		} else {
-			applyPGXPoolConfig(poolConfig, cfg)
-			dbPool, err = pgxpool.NewWithConfig(context.Background(), poolConfig)
-			if err != nil {
-				fmt.Printf("Failed to initialize database pool: %v\n", err)
-			}
+			fmt.Printf("Failed to initialize database pool: %v\n", err)
 		}
-
 		planDB, err = sql.Open("postgres", cfg.DBConn)
 		if err != nil {
 			fmt.Printf("Failed to initialize plan database handle: %v\n", err)
-		} else {
-			repository.ApplySQLDBPoolConfig(planDB, cfg)
 		}
 	}
 
@@ -152,10 +127,7 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 	subCache := cache.NewInMemory()
 	const repoCacheTTL = 5 * time.Minute
 
-	var rawPlanRepo repository.PlanRepository = repository.NewMockPlanRepo()
-	if planDB != nil {
-		rawPlanRepo = repository.NewPostgresPlanRepo(planDB)
-	}
+	rawPlanRepo := repository.NewMockPlanRepo()
 	rawSubRepo := repository.NewMockSubscriptionRepo(
 		&repository.SubscriptionRow{ID: "sub-123", TenantID: "", CustomerID: "c1", Status: "active", PlanID: "p1"},
 		&repository.SubscriptionRow{ID: "sub-456", TenantID: "", CustomerID: "c2", Status: "active", PlanID: "p1"},
@@ -171,33 +143,19 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 	stmtRepo := repository.NewMockStatementRepo()
 	stmtSvc := service.NewStatementService(rawSubRepo, stmtRepo)
 
-	// Fees and swap service wiring
-	feeSvc := service.NewFeeService()
-	feesHandler := handlers.NewFeesHandler(feeSvc)
-	swapRouter := service.NewSwapRouter()
-	swapHandler := handlers.NewSwapHandler(swapRouter)
-
 	// handlerSubSvc adapts the mock repo to satisfy handlers.SubscriptionService.
 	handlerSubSvc := &mockHandlerSubSvc{repo: rawSubRepo}
 	// handlerPlanSvc adapts the cached plan repo to satisfy handlers.PlanService.
 	handlerPlanSvc := &mockHandlerPlanSvc{repo: cachedPlanRepo}
 
-	// Create handlers. The pool is wrapped in a PoolPinger so it satisfies
-	// handlers.DBPinger (pgxpool exposes Ping, the health check wants
-	// PingContext); readiness probes stay "not_configured" when no pool exists.
-	var dbHealth handlers.DBPinger
-	if dbPool != nil {
-		dbHealth = &db.PoolPinger{Pool: dbPool}
-	}
-	h := handlers.NewHandlerWithDependencies(handlerPlanSvc, handlerSubSvc, dbHealth, nil)
+	// Create handlers
+	h := handlers.NewHandlerWithDependencies(handlerPlanSvc, handlerSubSvc, dbPool, nil)
 
 	// Admin handler receives the cached repos so PurgeCache can invalidate them.
 	adminToken := os.Getenv("ADMIN_TOKEN")
 	adminHandler := handlers.NewAdminHandler(adminToken, cachedPlanRepo, cachedSubRepo)
-
 	// Feature flags handler
 	featureFlagsHandler := handlers.NewFeatureFlagsHandler(featureflags.GetInstance())
-
 	// Wire the cached plan repo into the package-level ListPlans handler.
 	handlers.SetPlanRepository(cachedPlanRepo)
 
@@ -223,13 +181,6 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 		v1.GET("/plans", h.ListPlans)
 		v1.GET("/statements/:id", handlers.NewGetStatementHandler(stmtSvc))
 		v1.GET("/statements", handlers.NewListStatementsHandler(stmtSvc))
-
-		// Fees module (#162)
-		v1.GET("/fees/history", feesHandler.GetFeeHistory)
-
-		// Swap router (#88)
-		v1.POST("/swap/exact-in", swapHandler.SwapExactTokensForTokens)
-		v1.POST("/swap/exact-out", swapHandler.SwapTokensForExactTokens)
 	}
 
 	// Legacy /api routes - also protected
@@ -276,29 +227,22 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 		reconStore := reconciliation.NewMemoryStore()
 		admin.POST("/reconcile", auth.RequirePermission(auth.PermManageSubscriptions), idemMiddleware, handlers.NewReconcileHandler(adapter, reconStore))
 		admin.GET("/reports", auth.RequirePermission(auth.PermReadReconciliation), handlers.NewListReportsHandler(reconStore))
-	}
 
-
-	return func(ctx context.Context) error {
-		if dbPool != nil {
-			log.Printf("closing database pool")
-			dbPool.Close()
-		}
-
-		if tracerShutdown != nil {
-			log.Printf("flushing tracer")
-			if err := tracerShutdown(ctx); err != nil {
-				return fmt.Errorf("shutdown tracer: %w", err)
-			}
-		}
-
-		return nil
-	}
-}
-
-		// Feature flags endpoints
 		admin.GET("/feature-flags", auth.RequirePermission(auth.PermManageSubscriptions), featureFlagsHandler.GetFeatureFlags)
 		admin.PATCH("/feature-flags", auth.RequirePermission(auth.PermManageSubscriptions), idemMiddleware, featureFlagsHandler.ToggleFeatureFlag)
+
+		if planDB != nil {
+			outboxRepo := outbox.NewPostgresRepository(planDB)
+			h.OutboxRepo = outboxRepo
+			subscriberKeyRepo := outbox.NewPostgresSubscriberKeyRepository(planDB)
+			subscriberKeysHandler := handlers.NewSubscriberKeysHandler(subscriberKeyRepo)
+			admin.POST("/subscriber-keys", auth.RequirePermission(auth.PermManageSubscriptions), idemMiddleware, subscriberKeysHandler.RegisterSubscriberKey)
+			admin.GET("/subscriber-keys/:subscriber_id", auth.RequirePermission(auth.PermManageSubscriptions), subscriberKeysHandler.ListSubscriberKeys)
+			admin.GET("/subscriber-keys/id/:id", auth.RequirePermission(auth.PermManageSubscriptions), subscriberKeysHandler.GetSubscriberKey)
+			admin.PATCH("/subscriber-keys/:id", auth.RequirePermission(auth.PermManageSubscriptions), idemMiddleware, subscriberKeysHandler.UpdateSubscriberKey)
+			admin.GET("/outbox/dead-letter", auth.RequirePermission(auth.PermManageSubscriptions), h.ListDeadLetteredEvents)
+			admin.POST("/outbox/:id/requeue", auth.RequirePermission(auth.PermManageSubscriptions), idemMiddleware, h.RequeueOutboxEvent)
+		}
 	}
 
 	return func(ctx context.Context) error {
@@ -311,9 +255,7 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 		}
 		if planDB != nil {
 			log.Printf("closing plan database handle")
-			if err := planDB.Close(); err != nil {
-				return fmt.Errorf("close plan database handle: %w", err)
-			}
+			planDB.Close()
 		}
 		if tracerShutdown != nil {
 			log.Printf("flushing tracer")
@@ -323,19 +265,6 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 		}
 		return nil
 	}
-}
-
-func applyPGXPoolConfig(poolConfig *pgxpool.Config, cfg config.Config) {
-	if poolConfig == nil {
-		return
-	}
-
-	poolConfig.MaxConns = int32(cfg.DBPoolMaxConns)
-	poolConfig.MinConns = int32(cfg.DBPoolMinConns)
-	poolConfig.MaxConnLifetime = time.Duration(cfg.DBPoolMaxConnLifetime) * time.Second
-	poolConfig.MaxConnIdleTime = time.Duration(cfg.DBPoolMaxConnIdleTime) * time.Second
-	poolConfig.HealthCheckPeriod = time.Duration(cfg.DBPoolHealthCheckPeriod) * time.Second
-	poolConfig.ConnConfig.ConnectTimeout = time.Duration(cfg.DBPoolConnectTimeout) * time.Second
 }
 
 // mockHandlerSubSvc adapts *repository.MockSubscriptionRepo to handlers.SubscriptionService.

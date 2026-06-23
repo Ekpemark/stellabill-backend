@@ -437,8 +437,8 @@ func TestAuthMiddleware_ClaimsProjectionVerification(t *testing.T) {
 		}
 		capturedRoles = rolesValue.([]auth.Role)
 		
-		capturedCallerID, _ = c.Get("callerID")
-		capturedTenantID, _ = c.Get("tenantID")
+		capturedCallerID = c.GetString("callerID")
+		capturedTenantID = c.GetString("tenantID")
 		
 		c.JSON(http.StatusOK, gin.H{"message": "success"})
 	})

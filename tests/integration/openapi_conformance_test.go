@@ -2,21 +2,21 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
+	"github.com/getkin/kin-openapi/routers"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"stellarbill-backend/internal/auth"
 	"stellarbill-backend/internal/config"
 	"stellarbill-backend/internal/routes"
 	"stellarbill-backend/internal/testutil"
@@ -464,7 +464,7 @@ func testListStatementsConformance(t *testing.T, router *gin.Engine, spec *opena
 // Note: Validation is informative. Errors are logged but don't fail the test
 // to provide visibility into schema mismatches without strict enforcement.
 func validateResponseAgainstSchema(
-	t *testing.T,
+	tb testing.TB,
 	router *gin.Engine,
 	httpResponse *http.Response,
 	pathPattern string,
@@ -474,7 +474,12 @@ func validateResponseAgainstSchema(
 	// Find the path in the spec
 	pathItem := spec.Paths.Find(pathPattern)
 	if pathItem == nil {
-		t.Logf("warning: path pattern '%s' not found in OpenAPI spec", pathPattern)
+		tb.Logf("warning: path pattern '%s' not found in OpenAPI spec", pathPattern)
+		return
+	}
+
+	if httpResponse == nil || httpResponse.Request == nil {
+		tb.Logf("warning: response request unavailable for schema validation")
 		return
 	}
 
@@ -482,12 +487,12 @@ func validateResponseAgainstSchema(
 	method := strings.ToLower(httpResponse.Request.Method)
 	operation := pathItem.GetOperation(method)
 	if operation == nil {
-		t.Logf("warning: operation %s %s not found in OpenAPI spec", method, pathPattern)
+		tb.Logf("warning: operation %s %s not found in OpenAPI spec", method, pathPattern)
 		return
 	}
 
 	// Create the route for validation
-	route := &openapi3filter.Route{
+	route := &routers.Route{
 		Path:      pathPattern,
 		PathItem:  pathItem,
 		Method:    method,
@@ -497,7 +502,7 @@ func validateResponseAgainstSchema(
 	// Read response body
 	bodyBytes, err := io.ReadAll(httpResponse.Body)
 	if err != nil {
-		t.Logf("error reading response body: %v", err)
+		tb.Logf("error reading response body: %v", err)
 		return
 	}
 
@@ -506,20 +511,16 @@ func validateResponseAgainstSchema(
 
 	// Create validation input
 	validationInput := &openapi3filter.ResponseValidationInput{
-		RequestRoute: route,
-		Status:       statusCode,
-		Header:       httpResponse.Header,
-		Body:         io.NopCloser(bytes.NewReader(bodyBytes)),
-		Options: &openapi3filter.Options{
-			SkipSettingDefaultValues: true,
+		RequestValidationInput: &openapi3filter.RequestValidationInput{
+			Route: route,
 		},
+		Status: statusCode,
+		Header: httpResponse.Header,
+		Body:   io.NopCloser(bytes.NewReader(bodyBytes)),
 	}
 
-	// Validate response against schema
-	if err := openapi3filter.ValidateResponse(validationInput); err != nil {
-		// Log validation errors for debugging, but don't fail the test
-		// This provides visibility into schema mismatches
-		t.Logf("OpenAPI schema validation note for %s %s (status %d): %v",
+	if err := openapi3filter.ValidateResponse(context.Background(), validationInput); err != nil {
+		tb.Logf("OpenAPI schema validation note for %s %s (status %d): %v",
 			method, pathPattern, statusCode, err)
 	}
 }
@@ -606,9 +607,8 @@ func TestOpenAPISpecValidity(t *testing.T) {
 			require.NotNil(t, schema, fmt.Sprintf("schema %s should exist", schemaName))
 
 			// additionalProperties should be false for strict response validation
-			if schema.Value != nil && schema.Value.AdditionalProperties != nil {
-				assert.False(t, schema.Value.AdditionalProperties.Has,
-					fmt.Sprintf("schema %s should have additionalProperties: false", schemaName))
+			if schema.Value != nil && schema.Value.AdditionalProperties.Has != nil && *schema.Value.AdditionalProperties.Has {
+				assert.Fail(t, fmt.Sprintf("schema %s should have additionalProperties: false", schemaName))
 			}
 		}
 	})

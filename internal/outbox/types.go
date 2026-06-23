@@ -39,10 +39,14 @@ const (
 
 // EventData represents the structure of event data
 type EventData struct {
-	Type      string      `json:"type"`
-	Data      interface{} `json:"data"`
-	Timestamp time.Time   `json:"timestamp"`
-	ID        string      `json:"id"`
+	Type         string      `json:"type"`
+	Data         interface{} `json:"data,omitempty"`
+	Timestamp    time.Time   `json:"timestamp"`
+	ID           string      `json:"id"`
+	Encrypted    bool        `json:"encrypted,omitempty"`
+	JWE          string      `json:"jwe,omitempty"`
+	KeyID        string      `json:"key_id,omitempty"`
+	SubscriberID string      `json:"subscriber_id,omitempty"`
 }
 
 // Publisher interface for event publishing
