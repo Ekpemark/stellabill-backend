@@ -28,10 +28,11 @@ func setupTestRouter() (*gin.Engine, string) {
 
 func createToken(secret string, sub string, roles []auth.Role, exp time.Time) (string, error) {
 	claims := jwt.MapClaims{
-		"sub":   sub,
-		"roles": roles,
-		"exp":   exp.Unix(),
-		"iat":   time.Now().Unix(),
+		"sub":    sub,
+		"roles":  roles,
+		"tenant": "test-tenant",
+		"exp":    exp.Unix(),
+		"iat":    time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(secret))
@@ -104,6 +105,9 @@ func TestAuthMiddleware_Integration(t *testing.T) {
 			}
 			for k, v := range tt.headers {
 				req.Header.Set(k, v)
+			}
+			if tt.token != "" {
+				req.Header.Set("X-Tenant-ID", "test-tenant")
 			}
 			r.ServeHTTP(rec, req)
 

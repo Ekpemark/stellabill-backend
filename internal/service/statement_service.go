@@ -123,13 +123,7 @@ func (s *statementService) ListByCustomer(ctx context.Context, callerID string, 
 	if isAdmin {
 		isAuthorized = true
 	} else if isMerchant {
-		// In a real app, we'd have a merchant_customers relationship.
-		// For this implementation, we'll allow merchants to list if they provide a valid merchant-owned subscription filter,
-		// or if we have another way to verify. For now, we'll assume they are authorized if they are a merchant
-		// BUT we should filter by tenant if possible.
-		// Since ListByCustomerID doesn't take tenantID, we might need to add it or trust the caller if it's a merchant.
-		// TODO: Hardening: Filter by tenant if merchant.
-		isAuthorized = true 
+		isAuthorized = true
 	} else if callerID == customerID {
 		isAuthorized = true
 	}
@@ -144,7 +138,20 @@ func (s *statementService) ListByCustomer(ctx context.Context, callerID string, 
 		return nil, 0, nil, err
 	}
 
-	// 3. Build StatementDetail slice.
+	// 3. Build StatementDetail slice (merchants only see statements for their tenant).
+	if isMerchant {
+		filtered := make([]*repository.StatementRow, 0, len(rows))
+		for _, row := range rows {
+			subRow, err := s.subRepo.FindByID(ctx, row.SubscriptionID)
+			if err != nil || subRow.TenantID != callerID {
+				continue
+			}
+			filtered = append(filtered, row)
+		}
+		rows = filtered
+		count = len(filtered)
+	}
+
 	result := &ListStatementsDetail{
 		Statements: make([]*StatementDetail, 0, len(rows)),
 	}

@@ -82,7 +82,7 @@ type updateSubscriberKeyRequest struct {
 	Status string `json:"status" binding:"required"`
 }
 
-// UpdateSubscriberKey handles PATCH /api/admin/subscriber-keys/:id
+// UpdateSubscriberKey handles PATCH /api/admin/subscriber-keys/id/:id
 func (h *SubscriberKeysHandler) UpdateSubscriberKey(c *gin.Context) {
 	if h.repo == nil {
 		RespondWithError(c, http.StatusServiceUnavailable, ErrorCodeServiceUnavailable, "subscriber key repository not available")

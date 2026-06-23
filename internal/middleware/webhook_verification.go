@@ -150,15 +150,14 @@ func ProviderConfig(provider WebhookProvider) *WebhookConfig {
 	switch provider {
 	case ProviderStripe:
 		cfg.SignatureHeader = StripeSignatureHeader
-		// Stripe uses a separate timestamp header; avoid overwriting the signature header
-		cfg.TimestampHeader = "Stripe-Timestamp"
-		cfg.EventIDHeader = "Stripe-Event-Id"
+		cfg.TimestampHeader = ""
+		cfg.EventIDHeader = ""
 		cfg.SignatureVersion = "v1"
 		cfg.Algorithm = HMACSHA256
 		cfg.Tolerance = DefaultWebhookTolerance
 		cfg.RequireTimestamp = true
-		cfg.RequireEventID = true
-		cfg.EnableReplayProtection = true
+		cfg.RequireEventID = false
+		cfg.EnableReplayProtection = false
 	case ProviderPayPal:
 		cfg.SignatureHeader = "PAYPAL-TRANSMISSION-SIG"
 		cfg.TimestampHeader = "PAYPAL-TRANSMISSION-TIME"
@@ -297,7 +296,7 @@ func WebhookVerificationMiddleware(cfg *WebhookConfig) (gin.HandlerFunc, error) 
 		}
 
 		// Store provider info in context
-		c.Set("webhook_provider", cfg.Provider)
+		c.Set("webhook_provider", cfg.Provider.String())
 		c.Set("webhook_verified", true)
 
 		// Restore the body for downstream processing

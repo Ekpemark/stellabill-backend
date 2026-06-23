@@ -595,6 +595,7 @@ func TestEventIDCache(t *testing.T) {
 	})
 
 	t.Run("Len", func(t *testing.T) {
+		_ = cache.CheckAndStore(ctx, uuid.New().String())
 		assert.Equal(t, 1, cache.Len())
 	})
 

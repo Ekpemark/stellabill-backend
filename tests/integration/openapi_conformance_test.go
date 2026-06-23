@@ -1,3 +1,5 @@
+//go:build integration
+
 package integration
 
 import (
@@ -586,7 +588,7 @@ func TestOpenAPISpecValidity(t *testing.T) {
 			require.NotNil(t, pathItem, fmt.Sprintf("path %s should exist", pt.path))
 
 			for _, method := range pt.methods {
-				op := pathItem.GetOperation(strings.ToLower(method))
+				op := pathItem.GetOperation(method)
 				assert.NotNil(t, op,
 					fmt.Sprintf("path %s should have %s operation", pt.path, method))
 			}

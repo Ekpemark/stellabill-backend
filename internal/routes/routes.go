@@ -62,7 +62,6 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 
 	r.Use(middleware.CORS(cfg.Env, cfg.AllowedOrigins))
 
-	// Apply rate limiting middleware
 	rateLimitConfig := middleware.RateLimiterConfig{
 		Enabled:        cfg.RateLimitEnabled,
 		Mode:           middleware.RateLimitMode(cfg.RateLimitMode),
@@ -70,7 +69,6 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 		BurstSize:      int64(cfg.RateLimitBurst),
 		WhitelistPaths: append(cfg.RateLimitWhitelist, "/metrics"),
 	}
-	r.Use(middleware.RateLimitMiddleware(rateLimitConfig))
 
 	var dbPool *pgxpool.Pool
 	var planDB *sql.DB
@@ -109,7 +107,11 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 
 	var idemStore middleware.IdempotencyStore
 	if dbPool != nil {
-		idemStore = middleware.NewPostgresIdempotencyStore(dbPool)
+		if err := dbPool.Ping(context.Background()); err == nil {
+			idemStore = middleware.NewPostgresIdempotencyStore(dbPool)
+		} else {
+			idemStore = middleware.NewInMemoryIdempotencyStore()
+		}
 	} else {
 		idemStore = middleware.NewInMemoryIdempotencyStore()
 	}
@@ -174,18 +176,20 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 
 	// V1 routes are all protected
 	v1.Use(authMiddleware)
+	v1.Use(middleware.RateLimitMiddleware(rateLimitConfig))
 	{
 		v1.GET("/subscriptions", auth.RequirePermission(auth.PermReadSubscriptions), h.ListSubscriptions)
 		v1.GET("/subscriptions/:id", auth.RequirePermission(auth.PermReadSubscriptions), h.GetSubscription)
 		v1.POST("/subscriptions/:id/status", auth.RequirePermission(auth.PermManageSubscriptions), handlers.NewChangeSubscriptionStatusHandler(svc))
-		v1.GET("/plans", h.ListPlans)
-		v1.GET("/statements/:id", handlers.NewGetStatementHandler(stmtSvc))
-		v1.GET("/statements", handlers.NewListStatementsHandler(stmtSvc))
+		v1.GET("/plans", auth.RequirePermission(auth.PermReadPlans), h.ListPlans)
+		v1.GET("/statements/:id", auth.RequirePermission(auth.PermReadSubscriptions), handlers.NewGetStatementHandler(stmtSvc))
+		v1.GET("/statements", auth.RequirePermission(auth.PermReadSubscriptions), handlers.NewListStatementsHandler(stmtSvc))
 	}
 
 	// Legacy /api routes - also protected
 	apiProtected := api.Group("")
 	apiProtected.Use(authMiddleware)
+	apiProtected.Use(middleware.RateLimitMiddleware(rateLimitConfig))
 	{
 		apiProtected.GET("/plans",
 			dep,
@@ -210,12 +214,13 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 			handlers.NewChangeSubscriptionStatusHandler(svc),
 		)
 
-		apiProtected.GET("/statements/:id", handlers.NewGetStatementHandler(stmtSvc))
-		apiProtected.GET("/statements", handlers.NewListStatementsHandler(stmtSvc))
+		apiProtected.GET("/statements/:id", auth.RequirePermission(auth.PermReadSubscriptions), handlers.NewGetStatementHandler(stmtSvc))
+		apiProtected.GET("/statements", auth.RequirePermission(auth.PermReadSubscriptions), handlers.NewListStatementsHandler(stmtSvc))
 	}
 
 	admin := api.Group("/admin")
 	admin.Use(authMiddleware)
+	admin.Use(middleware.RateLimitMiddleware(rateLimitConfig))
 	{
 		admin.POST("/purge", auth.RequirePermission(auth.PermManageSubscriptions), idemMiddleware, adminHandler.PurgeCache)
 		// Diagnostics endpoint — re-runs startup checks for live triage
@@ -239,7 +244,7 @@ func RegisterWithCleanup(r *gin.Engine) func(context.Context) error {
 			admin.POST("/subscriber-keys", auth.RequirePermission(auth.PermManageSubscriptions), idemMiddleware, subscriberKeysHandler.RegisterSubscriberKey)
 			admin.GET("/subscriber-keys/:subscriber_id", auth.RequirePermission(auth.PermManageSubscriptions), subscriberKeysHandler.ListSubscriberKeys)
 			admin.GET("/subscriber-keys/id/:id", auth.RequirePermission(auth.PermManageSubscriptions), subscriberKeysHandler.GetSubscriberKey)
-			admin.PATCH("/subscriber-keys/:id", auth.RequirePermission(auth.PermManageSubscriptions), idemMiddleware, subscriberKeysHandler.UpdateSubscriberKey)
+			admin.PATCH("/subscriber-keys/id/:id", auth.RequirePermission(auth.PermManageSubscriptions), idemMiddleware, subscriberKeysHandler.UpdateSubscriberKey)
 			admin.GET("/outbox/dead-letter", auth.RequirePermission(auth.PermManageSubscriptions), h.ListDeadLetteredEvents)
 			admin.POST("/outbox/:id/requeue", auth.RequirePermission(auth.PermManageSubscriptions), idemMiddleware, h.RequeueOutboxEvent)
 		}
