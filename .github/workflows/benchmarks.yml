@@ -50,8 +50,8 @@ jobs:
         run: |
           set -euo pipefail
           export DATABASE_URL="${DATABASE_URL:-postgres://user:pass@127.0.0.1:5432/stellabill?sslmode=disable}"
-          export JWT_SECRET="${JWT_SECRET:-dev-secret}"
-          export ADMIN_TOKEN="${ADMIN_TOKEN:-dev-admin-token}"
+          export JWT_SECRET="${JWT_SECRET:-LoadTest1!JwtSecret-MixedAlphaNumeric@123}"
+          export ADMIN_TOKEN="${ADMIN_TOKEN:-LoadTest1!AdminToken-MixedAlphaNumeric@123}"
           export ENV="${ENV:-development}"
           export TRACING_EXPORTER="${TRACING_EXPORTER:-none}"
           go run ./cmd/server >/tmp/loadtest-server.log 2>&1 &

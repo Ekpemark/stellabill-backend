@@ -27,6 +27,7 @@ function createJwtToken(secret, role, subject) {
   const payload = {
     sub: subject,
     role,
+    roles: [role],
     tenant: __ENV.LOADTEST_TENANT || 'loadtest-tenant',
     iat: timestamp,
     exp: timestamp + 3600,
