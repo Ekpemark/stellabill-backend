@@ -6,6 +6,10 @@ const DEFAULT_ROLE = 'merchant';
 const DEFAULT_HOST = 'http://127.0.0.1:8080';
 const DEFAULT_SUBJECT = 'loadtest-user';
 
+export function loadtestTarget() {
+  return __ENV.LOADTEST_TARGET || DEFAULT_HOST;
+}
+
 export function loadtestCustomerID() {
   return __ENV.LOADTEST_SUBJECT || DEFAULT_SUBJECT;
 }
