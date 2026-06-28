@@ -4,18 +4,34 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 )
 
-// ChainProvider tries multiple providers in order and returns the first successful result.
-// If all providers fail with ErrSecretNotFound, ChainProvider returns ErrSecretNotFound.
-// Any non-ErrSecretNotFound error is returned immediately.
+func NewDefaultProvider() Provider {
+	env := NewEnvProvider()
+	addr := os.Getenv("VAULT_ADDR")
+	if addr == "" {
+		return env
+	}
+
+	vault := NewVaultProvider(
+		addr,
+		os.Getenv("VAULT_TOKEN"),
+		os.Getenv("VAULT_PATH_PREFIX"),
+	)
+
+	chain, err := NewChainProvider(vault, env)
+	if err != nil {
+		return env
+	}
+	return chain
+}
+
 type ChainProvider struct {
 	providers []Provider
 }
 
-// NewChainProvider creates a provider that tries each provider in the given order.
-// At least one provider must be supplied.
 func NewChainProvider(providers ...Provider) (*ChainProvider, error) {
 	if len(providers) == 0 {
 		return nil, errors.New("chain provider requires at least one provider")
@@ -23,9 +39,6 @@ func NewChainProvider(providers ...Provider) (*ChainProvider, error) {
 	return &ChainProvider{providers: providers}, nil
 }
 
-// GetSecret tries each provider in order. Returns the first successful value.
-// If a provider returns ErrSecretNotFound, the next provider is tried.
-// Any other error is returned immediately, wrapped with the provider name.
 func (c *ChainProvider) GetSecret(ctx context.Context, key string) (string, error) {
 	var notFoundErrs []string
 
@@ -34,13 +47,10 @@ func (c *ChainProvider) GetSecret(ctx context.Context, key string) (string, erro
 		if err == nil {
 			return val, nil
 		}
-
 		if errors.Is(err, ErrSecretNotFound) {
 			notFoundErrs = append(notFoundErrs, p.Name())
 			continue
 		}
-
-		// Non-not-found error — stop immediately
 		return "", fmt.Errorf("provider %q: %w", p.Name(), err)
 	}
 
@@ -52,11 +62,37 @@ func (c *ChainProvider) GetSecret(ctx context.Context, key string) (string, erro
 	)
 }
 
-// Name returns a composite name listing all child providers.
 func (c *ChainProvider) Name() string {
 	names := make([]string, len(c.providers))
 	for i, p := range c.providers {
 		names[i] = p.Name()
 	}
 	return "chain[" + strings.Join(names, "->") + "]"
+}
+
+func (c *ChainProvider) Metadata(ctx context.Context, key string) (SecretMetadata, error) {
+	var notFoundErrs []string
+
+	for _, p := range c.providers {
+		mp, ok := p.(MetadataProvider)
+		if !ok {
+			continue
+		}
+		md, err := mp.Metadata(ctx, key)
+		if err == nil {
+			return md, nil
+		}
+		if errors.Is(err, ErrMetadataNotFound) || errors.Is(err, ErrMetadataNotSupported) {
+			notFoundErrs = append(notFoundErrs, p.Name())
+			continue
+		}
+		return SecretMetadata{}, fmt.Errorf("provider %q metadata: %w", p.Name(), err)
+	}
+
+	return SecretMetadata{}, fmt.Errorf(
+		"metadata for %q not found in providers [%s]: %w",
+		key,
+		strings.Join(notFoundErrs, ", "),
+		ErrMetadataNotFound,
+	)
 }
